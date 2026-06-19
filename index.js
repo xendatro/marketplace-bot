@@ -12,8 +12,16 @@ const { Pool } = require('pg');
 
 const CONFIG = {
   categoryName: 'marketplace',
-  adminRole: 'admin',
-  artistRole: 'artist',
+  adminRole: 'Admin',
+  artistRole: 'Artist',
+  disciplines: ['Modeler'],
+  levels: [
+    { role: 'Level 1', min: 0 },
+    { role: 'Level 2', min: 5 },
+    { role: 'Level 3', min: 15 },
+    { role: 'Level 4', min: 30 },
+    { role: 'Level 5', min: 50 },
+  ],
   tags: {
     unclaimed:  'Unclaimed',
     inProgress: 'In-Progress',
@@ -45,6 +53,12 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS completions (
       artist_id TEXT PRIMARY KEY,
       count     INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS artists (
+      artist_id TEXT PRIMARY KEY,
+      portfolio TEXT
     );
   `);
 }
@@ -100,10 +114,48 @@ function plural(n) {
   return `${n} completion${n === 1 ? '' : 's'}`;
 }
 
-function artistDisplayName(interaction) {
-  const member = interaction.options.getMember('artist');
-  const user = interaction.options.getUser('artist');
-  return member?.displayName ?? user?.username ?? 'That user';
+function disciplineOption(name) {
+  return name.toLowerCase().replace(/\s+/g, '-');
+}
+
+function levelFor(count) {
+  let chosen = CONFIG.levels[0];
+  for (const lvl of CONFIG.levels) {
+    if (count >= lvl.min) chosen = lvl;
+  }
+  return chosen;
+}
+
+function findRole(guild, roleName) {
+  return guild.roles.cache.find(
+    (r) => r.name.toLowerCase() === roleName.toLowerCase()
+  );
+}
+
+async function updateLevelRole(guild, artistId, count) {
+  if (!guild) return;
+  const targetName = levelFor(count).role;
+  const targetRole = findRole(guild, targetName);
+  if (!targetRole) {
+    console.error(`Level role "${targetName}" not found — create it or check spelling.`);
+    return;
+  }
+  let member;
+  try {
+    member = await guild.members.fetch(artistId);
+  } catch {
+    return;
+  }
+  const levelNames = new Set(CONFIG.levels.map((l) => l.role.toLowerCase()));
+  const removeIds = member.roles.cache
+    .filter((r) => levelNames.has(r.name.toLowerCase()) && r.id !== targetRole.id)
+    .map((r) => r.id);
+  try {
+    if (removeIds.length) await member.roles.remove(removeIds);
+    if (!member.roles.cache.has(targetRole.id)) await member.roles.add(targetRole);
+  } catch (err) {
+    console.error('Failed to update level role (check Manage Roles + role hierarchy):', err);
+  }
 }
 
 async function getClaim(threadId) {
@@ -136,7 +188,36 @@ async function setCount(artistId, n) {
   return n;
 }
 
+async function getPortfolio(artistId) {
+  const { rows } = await pool.query(
+    'SELECT portfolio FROM artists WHERE artist_id = $1',
+    [artistId]
+  );
+  return rows[0]?.portfolio ?? null;
+}
+
+async function setPortfolio(artistId, link) {
+  await pool.query(
+    `INSERT INTO artists (artist_id, portfolio)
+     VALUES ($1, $2)
+     ON CONFLICT (artist_id) DO UPDATE SET portfolio = $2`,
+    [artistId, link]
+  );
+}
+
 const NO_PING = { allowedMentions: { parse: [] } };
+
+const createArtistBuilder = new SlashCommandBuilder()
+  .setName('createartist')
+  .setDescription('Register a new artist and assign their roles.')
+  .addUserOption((opt) =>
+    opt.setName('artist').setDescription('The member to set up as an artist').setRequired(true)
+  );
+for (const d of CONFIG.disciplines) {
+  createArtistBuilder.addBooleanOption((opt) =>
+    opt.setName(disciplineOption(d)).setDescription(`Give the ${d} role`).setRequired(false)
+  );
+}
 
 const commands = [
   new SlashCommandBuilder()
@@ -168,7 +249,7 @@ const commands = [
     .setDescription('Show the artists with the most completions.'),
   new SlashCommandBuilder()
     .setName('view')
-    .setDescription("View an artist's completion count.")
+    .setDescription("View an artist's profile and completion count.")
     .addUserOption((opt) =>
       opt.setName('artist').setDescription('The artist to look up').setRequired(true)
     ),
@@ -205,6 +286,13 @@ const commands = [
     .addUserOption((opt) =>
       opt.setName('artist').setDescription('The artist to clear').setRequired(true)
     ),
+  new SlashCommandBuilder()
+    .setName('portfolio')
+    .setDescription('Set or clear your portfolio link (artists only).')
+    .addStringOption((opt) =>
+      opt.setName('link').setDescription('Your portfolio URL (leave blank to clear)').setRequired(false)
+    ),
+  createArtistBuilder,
 ].map((c) => c.toJSON());
 
 client.once(Events.ClientReady, async (c) => {
@@ -304,13 +392,15 @@ async function handleDone(interaction, thread) {
   }
 
   const result = await applyTag(thread, 'done');
-  await pool.query(
+  const { rows } = await pool.query(
     `INSERT INTO completions (artist_id, count)
      VALUES ($1, 1)
-     ON CONFLICT (artist_id) DO UPDATE SET count = completions.count + 1`,
+     ON CONFLICT (artist_id) DO UPDATE SET count = completions.count + 1
+     RETURNING count`,
     [existing.artist_id]
   );
   await pool.query('DELETE FROM claims WHERE thread_id = $1', [thread.id]);
+  await updateLevelRole(interaction.guild, existing.artist_id, rows[0].count);
   await interaction.editReply(
     `Transaction complete — marked **${CONFIG.tags.done}** and the post is now closed. Thanks <@${existing.artist_id}>!${tagNote(result)}`
   );
@@ -367,19 +457,42 @@ async function handleLeaderboard(interaction) {
   }
 
   const medals = ['🥇', '🥈', '🥉'];
-  const list = rows
-    .map((r, i) => `${medals[i] ?? `**${i + 1}.**`} <@${r.artist_id}> — ${r.count}`)
-    .join('\n');
-  return interaction.editReply({ content: `**🏆 Completions leaderboard**\n${list}`, ...NO_PING });
+  const lines = [];
+  for (let i = 0; i < rows.length; i++) {
+    let name;
+    try {
+      const member = await interaction.guild.members.fetch(rows[i].artist_id);
+      name = member.displayName;
+    } catch {
+      name = 'Unknown artist';
+    }
+    lines.push(`${medals[i] ?? `**${i + 1}.**`} ${name} — ${rows[i].count}`);
+  }
+  return interaction.editReply({ content: `**🏆 Completions leaderboard**\n${lines.join('\n')}`, ...NO_PING });
 }
 
 async function handleView(interaction) {
   await interaction.deferReply();
 
   const artistUser = interaction.options.getUser('artist');
-  const name = artistDisplayName(interaction);
+  const artistMember = interaction.options.getMember('artist');
   const count = await getCount(artistUser.id);
-  return interaction.editReply({ content: `**${name}** has **${plural(count)}**.`, ...NO_PING });
+  const level = levelFor(count).role;
+  const portfolio = await getPortfolio(artistUser.id);
+  const displayName = artistMember?.displayName ?? artistUser.username;
+  const portfolioLine = portfolio
+    ? portfolio
+    : "Not linked — this artist hasn't added a portfolio yet. Ask them directly if you'd like to see their work.";
+
+  const content = [
+    `**Display Name:** ${displayName}`,
+    `**Username:** ${artistUser.username}`,
+    `**Completions:** ${count}`,
+    `**Level:** ${level}`,
+    `**Portfolio:** ${portfolioLine}`,
+  ].join('\n');
+
+  return interaction.editReply({ content, ...NO_PING });
 }
 
 async function handleStat(interaction, op) {
@@ -412,12 +525,92 @@ async function handleStat(interaction, op) {
   else next = 0;
 
   await setCount(artistUser.id, next);
+  await updateLevelRole(interaction.guild, artistUser.id, next);
 
   let message;
   if (op === 'set') message = `Set **${name}** to **${plural(next)}**.`;
   else if (op === 'add') message = `Added **${amount}** — **${name}** now has **${plural(next)}**.`;
   else if (op === 'subtract') message = `Subtracted **${amount}** — **${name}** now has **${plural(next)}**.`;
   else message = `Cleared **${name}**'s completions — now **${plural(0)}**.`;
+
+  return interaction.editReply({ content: message, ...NO_PING });
+}
+
+async function handlePortfolio(interaction) {
+  if (!hasRole(interaction.member, CONFIG.artistRole)) {
+    return interaction.reply({
+      content: `Only members with the **${CONFIG.artistRole}** role can set a portfolio.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const link = interaction.options.getString('link');
+  if (!link) {
+    await setPortfolio(interaction.user.id, null);
+    return interaction.editReply('Your portfolio link has been cleared.');
+  }
+  if (!/^https?:\/\//i.test(link)) {
+    return interaction.editReply(
+      "That doesn't look like a valid link — please include the full URL (starting with http:// or https://)."
+    );
+  }
+  await setPortfolio(interaction.user.id, link);
+  return interaction.editReply(`Your portfolio link has been set to: ${link}`);
+}
+
+async function handleCreateArtist(interaction) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({
+      content: `Only members with the **${CONFIG.adminRole}** role can use this command.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const artistUser = interaction.options.getUser('artist');
+  let member;
+  try {
+    member = await interaction.guild.members.fetch(artistUser.id);
+  } catch {
+    return interaction.editReply("Couldn't find that member in this server.");
+  }
+
+  const selected = CONFIG.disciplines.filter((d) =>
+    interaction.options.getBoolean(disciplineOption(d))
+  );
+
+  const wanted = [CONFIG.artistRole, ...selected];
+  const missing = [];
+  for (const roleName of wanted) {
+    const role = findRole(interaction.guild, roleName);
+    if (!role) {
+      missing.push(roleName);
+      continue;
+    }
+    try {
+      if (!member.roles.cache.has(role.id)) await member.roles.add(role);
+    } catch {
+      missing.push(roleName);
+    }
+  }
+
+  await pool.query(
+    `INSERT INTO artists (artist_id, portfolio) VALUES ($1, NULL)
+     ON CONFLICT (artist_id) DO NOTHING`,
+    [artistUser.id]
+  );
+  await updateLevelRole(interaction.guild, artistUser.id, await getCount(artistUser.id));
+
+  const given = wanted.filter((r) => !missing.includes(r));
+  let message = `Registered **${member.displayName}** as an artist.`;
+  if (given.length) message += `\nRoles given: ${given.join(', ')}.`;
+  if (missing.length) {
+    message += `\n⚠️ Couldn't assign: ${missing.join(', ')}. Check the role exists, the spelling matches, and that my role is **above** it (Server Settings → Roles), with **Manage Roles** enabled.`;
+  }
+  message += `\nThey can run **/portfolio** to add a portfolio link.`;
 
   return interaction.editReply({ content: message, ...NO_PING });
 }
@@ -434,6 +627,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (name === 'current') return await handleCurrent(interaction);
     if (name === 'leaderboard') return await handleLeaderboard(interaction);
     if (name === 'view') return await handleView(interaction);
+    if (name === 'portfolio') return await handlePortfolio(interaction);
+    if (name === 'createartist') return await handleCreateArtist(interaction);
     if (STAT_COMMANDS.has(name)) return await handleStat(interaction, name);
 
     if (POST_COMMANDS.has(name)) {
@@ -460,8 +655,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } catch (err) {
     console.error(err);
     const msg =
-      'Something went wrong — make sure I have the **Manage Posts / Manage Threads** ' +
-      'permission and that the database is reachable.';
+      'Something went wrong — make sure I have the **Manage Posts / Manage Threads** and ' +
+      '**Manage Roles** permissions, that my role is high enough, and that the database is reachable.';
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply(msg).catch(() => {});
     } else {

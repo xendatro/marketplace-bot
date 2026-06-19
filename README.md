@@ -15,22 +15,38 @@ Postgres database.
 | `/done` | author / admin | Tag → **Completed**, public confirmation, **+1 to that artist's completion count**, then locks + archives the post. |
 | `/close` | author / admin | Tag → **Closed**, then locks + archives the post (no completion credited). |
 | `/current @artist` | admin | Lists that artist's current (active) tasks by title. Private to the admin who runs it. |
-| `/leaderboard` | everyone | Shows the artists with the most completions. |
-| `/view @artist` | everyone | Shows that artist's completion count (no ping). |
+| `/leaderboard` | everyone | Top 10 artists by completions (names only — no pings). |
+| `/view @artist` | everyone | Shows the artist's Display Name, Username, Completions, Level, and Portfolio (no ping). |
 | `/set @artist <n>` | admin | Sets that artist's completion count to `n`. |
 | `/add @artist <n>` | admin | Adds `n` to that artist's completion count. |
 | `/subtract @artist <n>` | admin | Subtracts `n` (won't go below 0). |
 | `/clear @artist` | admin | Resets that artist's completion count to 0. |
+| `/portfolio [link]` | artist | Sets your own portfolio link; leave blank to clear it. |
+| `/createartist @user [modeler]` | admin | Registers a member as an artist: gives the **Artist** role, **Level 1**, and any disciplines you toggle (e.g. **Modeler**). |
 
 Each lifecycle state is shown by swapping the post's tag (only one state tag at
 a time). The bot watches every forum under the **marketplace** category, so
 adding more forums later needs no code changes. The completion-editing commands
-(`/set` `/add` `/subtract` `/clear`) only work on members who have the **artist**
+(`/set` `/add` `/subtract` `/clear`) only work on members who have the **Artist**
 role.
 
+### Levels
+Each artist's **Level** role is assigned automatically from their completion
+count, and re-evaluated every time the count changes (`/done` and the admin
+commands). The default bands (editable in `CONFIG.levels`):
+
+| Role | Completions |
+|------|-------------|
+| `Level 1` | 0–4 |
+| `Level 2` | 5–14 |
+| `Level 3` | 15–29 |
+| `Level 4` | 30–49 |
+| `Level 5` | 50+ |
+
 ### Access map
-- `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **the post's author or an admin**
-- `/current`, `/set`, `/add`, `/subtract`, `/clear` → **admin** role
+- `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **the post's author or an Admin**
+- `/current`, `/set`, `/add`, `/subtract`, `/clear`, `/createartist` → **Admin** role
+- `/portfolio` → **Artist** role (sets their own)
 - `/leaderboard`, `/view` → everyone
 
 ## One-time setup
@@ -49,17 +65,26 @@ forum's settings, create tags named exactly (matching is case-insensitive):
 the name.)
 
 ### 2. Create the roles
-Make sure you have roles named `artist` and `admin`. Artists are the people
-making the assets — a post can only be claimed for, and completions can only be
-edited for, someone with this role. The lifecycle commands are run by the post's
-author or an admin; admins also handle oversight (`/current`) and completion
-edits (`/set` `/add` `/subtract` `/clear`).
+Create these roles (names are matched case-insensitively):
+
+- `Admin` — runs oversight + completion-editing commands
+- `Artist` — required to be claimed for, to be credited, and to set a portfolio
+- `Level 1`, `Level 2`, `Level 3`, `Level 4`, `Level 5` — assigned automatically
+- `Modeler` (and any other disciplines you add to `CONFIG.disciplines`)
+
+The lifecycle commands are run by the post's author or an Admin.
 
 ### 3. Give the bot permission
-The bot's role needs **Manage Posts** (a.k.a. Manage Threads) in the
-marketplace forums, plus **View Channels** and **Send Messages**. The simplest
-path is to give its role those permissions server-wide, or per-category on the
-marketplace category.
+The bot's role needs:
+
+- **Manage Posts** (a.k.a. Manage Threads) in the marketplace forums
+- **Manage Roles** (so it can assign Level / Artist / discipline roles)
+- **View Channels** and **Send Messages**
+
+**Important:** in **Server Settings → Roles**, drag the bot's role **above**
+`Artist`, `Modeler`, and `Level 1`–`Level 5`. Discord refuses to assign any role
+that sits higher than the bot's own role, so if levels aren't being applied, this
+is almost always why.
 
 ### 4. Fill in your secrets
 Set these environment variables (locally via a `.env` file, or in your host's
@@ -107,5 +132,8 @@ not a Web Service.
 ## Changing things later
 
 Everything adjustable lives in the `CONFIG` block at the top of `index.js`: the
-category name, the role names (admin / artist), and the five state tag names.
-Change a value there, save, and restart the bot.
+category name, the role names (`Admin` / `Artist`), the discipline list, the
+level bands, and the five state tag names. To add a new discipline, add it to
+`CONFIG.disciplines` (e.g. `'Animator'`) and create a matching role — it becomes
+a toggle on `/createartist` automatically. Change a value there, save, and
+restart the bot.
