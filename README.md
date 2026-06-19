@@ -1,116 +1,138 @@
 # Marketplace Forum Bot
 
-A single-file Discord bot that manages the lifecycle of marketplace posts in
-your forum(s) using tags, and tracks artist claims and completions in a
-Postgres database.
+A Discord bot for a Roblox marketplace server. Buyers create listings through a
+guided `/post` form (the bot makes the forum post for them), artists **apply**
+for the tasks they want, and the buyer **accepts** one. The bot tracks
+applications, completions, levels, and portfolios in a Postgres database.
 
-## What it does
+## The lifecycle
 
-| Step | Trigger | Who | Result |
+| Step | Command | Who | Result |
 |------|---------|-----|--------|
-| New post created | automatic | — | Tag → **Unclaimed** |
-| `/claim @artist` | author / admin | Tag → **In-Progress**, public "Claimed by @artist". The user must have the **discipline role required by that forum** (e.g. `Modeler` in the `models` forum). A post that's already claimed can't be claimed again. |
-| `/unclaim` | author / admin | Tag → **Unclaimed**, clears the claimer. Helpful message if nothing was claimed. |
-| `/paid` | author / admin | Tag → **Paid**, public "@buyer has paid. @artist, please send the asset over via DM to finish this process." |
-| `/done` | author / admin | Tag → **Completed**, public confirmation, **+1 to that artist's completion count**, then locks + archives the post. |
-| `/close` | author / admin | Tag → **Closed**, then locks + archives the post (no completion credited). |
-| `/current @artist` | admin | Lists that artist's current (active) tasks by title. Private to the admin who runs it. |
-| `/leaderboard` | everyone | Top 10 artists by completions (names only — no pings). |
-| `/view @artist` | everyone | Shows the artist's Display Name, Username, Completions, Level, and Portfolio (no ping). |
-| `/set @artist <n>` | admin | Sets that artist's completion count to `n`. |
-| `/add @artist <n>` | admin | Adds `n` to that artist's completion count. |
-| `/subtract @artist <n>` | admin | Subtracts `n` (won't go below 0). |
-| `/clear @artist` | admin | Resets that artist's completion count to 0. |
-| `/portfolio [link]` | artist | Sets your own portfolio link; leave blank to clear it. |
-| `/createartist @user [modeler]` | admin | Registers a member as an artist: gives the **Artist** role, **Level 1**, and any disciplines you toggle (e.g. **Modeler**). |
+| Create a listing | `/post` | **Buyer** | Guided form → the bot posts the thread, tagged **Open**, and records the buyer as the owner. |
+| Show interest | `/apply` | **Artist** (with the forum's discipline role) | Adds the artist to the applicant pool and posts their **portfolio**. Unlimited applicants — but only while the post is **Open** (applications close once someone's accepted). |
+| Withdraw interest | `/withdraw` | **Artist** | Removes their own pending application (only possible while Open). |
+| Assign the task | `/accept @artist` | **Buyer / Admin** | Picks one applicant → **In-Progress**, and **clears all other applications**. Re-checks discipline, that they applied, and their accepted-task cap. |
+| Un-assign | `/unaccept` | **Buyer / Admin** | Removes the acceptance → back to **Open**. The pool was cleared on accept, so artists must **re-apply**. |
+| Step down | `/resign` | **Artist** (the accepted one) | The accepted artist leaves the task → back to **Open**. Allowed anytime, even after payment. |
+| Mark paid | `/paid` | **Buyer / Admin** | → **Paid**, pings the accepted artist to deliver via DM. |
+| Complete | `/done` | **Buyer / Admin** | → **Completed**, **+1** to the accepted artist, then locks + archives. |
+| Close | `/close` | **Buyer / Admin** | → **Closed**, locks + archives (no credit). |
 
-Each lifecycle state is shown by swapping the post's tag (only one state tag at
-a time). The bot watches every forum under the **marketplace** category, so
-adding more forums later needs no code changes. The completion-editing commands
-(`/set` `/add` `/subtract` `/clear`) only work on members who have the **Artist**
-role.
+Other commands:
 
-### Who can claim in a forum
-Claiming is gated by **discipline**, not the generic `Artist` role. `CONFIG.forumRoles`
-maps a forum name to the role required to be claimed there:
+| Command | Who | Result |
+|---------|-----|--------|
+| `/withdraw-all` | anyone | Withdraws all your pending applications server-wide (keeps accepted tasks). Run anywhere. |
+| `/current @artist` | **Admin** | Lists that artist's applications + accepted tasks (private). |
+| `/view @artist` | everyone | Display Name, Username, Completions, Level, Portfolio (no ping). |
+| `/leaderboard` | everyone | Top 10 by completions (plain names, no pings). |
+| `/portfolio [link]` | **Artist** | Sets/clears your own portfolio link. |
+| `/createartist @user [modeler]` | **Admin** | Gives the **Artist** role, **Level 1**, and any disciplines you toggle. |
+| `/set` `/add` `/subtract` `/clear` `@artist` | **Admin** | Edit an artist's completion count (artist-role targets only). |
 
-```js
-forumRoles: {
-  models: 'Modeler',
-},
-```
+**Apply vs accept:** an application is just interest — only an **accepted** artist
+is real, In-Progress work, and only `/done` on an accepted artist credits a
+completion. Applications are **unlimited** and not a queue; buyers choose from
+applicants by their **portfolios**. Accepting one artist **auto-clears the rest of
+the pool** to keep the post clean, so reopening it (`/unaccept` or `/resign`)
+means artists re-apply.
 
-So only a `Modeler` can be claimed for a post in the `models` forum. Add a forum
-to the map to gate it (e.g. `animations: 'Animator'`). Any forum not in the map
-falls back to requiring the `Artist` role. The `Artist` role itself no longer
-gates marketplace work — it's used for `/portfolio` and as the umbrella for
-completion tracking.
+**Nobody gets stuck — by design.** Every party can always exit: applicants
+`/withdraw` (or `/withdraw-all`), the accepted artist `/resign`s, and the buyer
+`/unaccept`s or `/close`s — all at any time, even after payment. The server is
+invite-only and members are vetted, so the bot prioritizes freedom and leaves
+real disputes to the moderators.
 
-### Levels
-Each artist's **Level** role is assigned automatically from their completion
-count, and re-evaluated every time the count changes (`/done` and the admin
-commands). The default bands (editable in `CONFIG.levels`):
+If a post is deleted, its tracking rows are cleaned up immediately (via the
+`ThreadDelete` event). If it was deleted while the bot was offline — when that
+event is missed — the bot reconciles on its next startup by dropping any tracked
+post whose thread no longer exists, so an artist can never stay "accepted" on a
+post that's gone.
 
-| Role | Completions | Max active claims |
-|------|-------------|-------------------|
+### Caps (per level)
+Applications are **unlimited**. The only cap is on **accepted (in-progress)**
+tasks — an artist's level number, counted across all forums.
+
+| Role | Completions | Max accepted |
+|------|-------------|--------------|
 | `Level 1` | 0–4 | 1 |
 | `Level 2` | 5–14 | 2 |
 | `Level 3` | 15–29 | 2 |
 | `Level 4` | 30–49 | 3 |
 | `Level 5` | 50+ | 3 |
 
-Active claims are counted **across all forums**. If an artist is already at their
-limit, `/claim` refuses and posts a **public** message listing the posts they
-still have open (so everyone — including the artist — can see what's left to
-finish). They must `/done`, `/close`, or `/unclaim` one before taking another.
+`/accept` is blocked once the artist is at their accepted cap. Level roles are
+assigned automatically and re-evaluated whenever a completion count changes.
 
-### Access map
-- `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **the post's author or an Admin**
-- `/current`, `/set`, `/add`, `/subtract`, `/clear`, `/createartist` → **Admin** role
-- `/portfolio` → **Artist** role (sets their own)
-- `/leaderboard`, `/view` → everyone
+### Who can apply in a forum
+Applying is gated by **discipline**. `CONFIG.forumRoles` maps a forum to the role
+required to apply there:
+
+```js
+forumRoles: { models: 'Modeler' },
+```
+
+So only a `Modeler` can apply in the `models` forum. The `Artist` role is the
+umbrella for tracking (portfolios, completion edits) — it no longer gates
+applying.
+
+## The `/post` form
+
+`/post` (buyers only) opens a short flow:
+1. **Category** select (currently `Models`).
+2. **Tags** select for that category (e.g. Low-Poly, Stylized…), then **Continue**.
+3. A popup with **Title**, **Price — USD**, **Price — Robux**, **Description**,
+   and a **Reference image(s)** upload (paste, drag, or browse — real images, not
+   links; 1–10 required).
+
+At least one price is required. The bot then creates the forum post:
+- Title formatted `[$USD] [R$Robux] Title` (only the prices you filled; the price
+  prefix is never truncated).
+- The selected tags applied (plus the `Open` state tag).
+- The image(s) attached.
+- Body:
+  ```
+  Buyer: @buyer
+  Description: …
+  ```
+- The buyer is recorded as the owner, so `/accept`, `/paid`, etc. recognize them
+  even though the bot created the thread.
+
+> Requires **discord.js ≥ 14.26** (modal file-upload + in-modal select support).
+> This repo pins a compatible version; run `npm install` to match it.
 
 ## One-time setup
 
-### 1. Create the five tags in each forum
-Forum tags live per-forum, so do this in **every** marketplace forum. In each
-forum's settings, create tags named exactly (matching is case-insensitive):
-
-- `Unclaimed`
-- `In-Progress`
-- `Paid`
-- `Completed`
-- `Closed`
-
-(You can give them their own emoji/colour in Discord — the bot only matches on
-the name.)
+### 1. Create the tags in the `models` forum
+In the forum's settings, create the five **state** tags:
+`Open`, `In-Progress`, `Paid`, `Completed`, `Closed`
+plus the **category** tags offered by `/post`:
+`Low-Poly`, `Mid-Poly`, `High-Poly`, `Stylized`, `Sculpt`, `Textured`, `No Texture`
+(names matched case-insensitively; Discord allows up to 20 tags per forum.)
 
 ### 2. Create the roles
-Create these roles (names are matched case-insensitively):
+- `Admin` — oversight + completion edits + accept/unaccept override
+- `Buyer` — can run `/post`
+- `Artist` — umbrella role: set a portfolio, be completion-tracked
+- `Modeler` — discipline required to claim in the `models` forum
+- `Level 1`–`Level 5` — assigned automatically
 
-- `Admin` — runs oversight + completion-editing commands
-- `Artist` — required to be claimed for, to be credited, and to set a portfolio
-- `Level 1`, `Level 2`, `Level 3`, `Level 4`, `Level 5` — assigned automatically
-- `Modeler` (and any other disciplines you add to `CONFIG.disciplines`)
+### 3. Make the bot the only way to post
+In the `models` forum's permissions, **deny “Create Posts”** for `@everyone`
+(and buyers), but keep **“Send Messages in Threads”** on so people can talk in
+their listings. Allow the bot to create posts. Now `/post` is the only entry.
 
-The lifecycle commands are run by the post's author or an Admin.
-
-### 3. Give the bot permission
-The bot's role needs:
-
-- **Manage Posts** (a.k.a. Manage Threads) in the marketplace forums
-- **Manage Roles** (so it can assign Level / Artist / discipline roles)
-- **View Channels** and **Send Messages**
+### 4. Give the bot permission
+- **Manage Posts / Manage Threads** and **Create Posts** in the forum
+- **Manage Roles** (to assign Artist / discipline / Level roles)
+- **Attach Files**, **View Channels**, **Send Messages**
 
 **Important:** in **Server Settings → Roles**, drag the bot's role **above**
-`Artist`, `Modeler`, and `Level 1`–`Level 5`. Discord refuses to assign any role
-that sits higher than the bot's own role, so if levels aren't being applied, this
-is almost always why.
+`Artist`, `Modeler`, and `Level 1`–`Level 5`. Discord won't let the bot assign a
+role higher than its own — the usual reason levels don't apply.
 
-### 4. Fill in your secrets
-Set these environment variables (locally via a `.env` file, or in your host's
-dashboard):
-
+### 5. Fill in your secrets
 - `DISCORD_TOKEN` — your bot token
 - `GUILD_ID` — your server's ID
 - `DATABASE_URL` — your Postgres connection string
@@ -123,38 +145,60 @@ npm start
 ```
 
 You should see `Logged in as ...`, then `Database ready.`, then
-`Slash commands registered.` The commands appear in your server immediately.
-
-For local development you need a Postgres database. Either run one locally and
-point `DATABASE_URL` at it (e.g. `postgres://user:pass@localhost:5432/marketplace`),
-or just use your hosted Render database's **external** connection string.
+`Slash commands registered.` For local dev, point `DATABASE_URL` at a local
+Postgres or your Render database's **external** connection string.
 
 ## Hosting on Render
 
 A Discord bot has no inbound web traffic, so it runs as a **Background Worker**,
 not a Web Service.
 
-1. **Create a Postgres database** on Render (Dashboard → New → Postgres). The
-   free tier is deleted after ~30 days; use a paid plan for anything you want to
-   keep.
-2. **Create a Background Worker** from this repo. Set the build command to
-   `npm install` and the start command to `npm start`.
-3. **Set environment variables** on the worker: `DISCORD_TOKEN`, `GUILD_ID`, and
-   `DATABASE_URL`. For `DATABASE_URL`, copy the **Internal** connection string
-   from your Render Postgres instance (internal is faster and free between Render
-   services).
-4. Deploy. The tables are created automatically on first start.
+1. **Create a Postgres database** (Dashboard → New → Postgres). The free tier is
+   deleted after ~30 days; use a paid plan to keep data.
+2. **Create a Background Worker** from this repo — build `npm install`, start
+   `npm start`.
+3. **Set env vars** on the worker: `DISCORD_TOKEN`, `GUILD_ID`, `DATABASE_URL`
+   (use the **Internal** connection string).
+4. Deploy. Tables are created automatically on first start.
 
-> **Why Postgres and not a file?** Render's normal filesystem is *ephemeral* — a
-> plain file (or a SQLite file without a persistent disk) is wiped on every
-> deploy and restart. A managed Postgres database is a separate service, so your
-> claims and completion counts survive redeploys.
+> **Why Postgres and not a file?** Render's filesystem is *ephemeral* — a plain
+> file (or SQLite without a persistent disk) is wiped on every deploy/restart. A
+> managed Postgres database survives redeploys.
+
+## Project structure
+
+```
+index.js                     entry point — creates the client, wires events, logs in
+config.js                    all tunables (roles, tags, levels, categories, disciplines)
+src/
+  db.js                      Postgres pool + every query (posts, claims, completions, artists)
+  roles.js                   role checks (hasRole, isAdmin, findRole, claimRoleFor)
+  levels.js                  level bands, caps, automatic level-role assignment
+  forum.js                   marketplace detection, tag swapping, forum lookup
+  guards.js                  reusable permission gates (buyer / admin / artist / post-owner)
+  util.js                    small shared helpers (NO_PING, plural, …)
+  commands/
+    index.js                 loads every command into a Collection
+    post.js                  the /post form (slash + select/button/modal handlers)
+    apply.js withdraw.js withdrawall.js accept.js unaccept.js resign.js
+    paid.js done.js close.js
+    current.js leaderboard.js view.js portfolio.js createartist.js
+    stats.js                 /set /add /subtract /clear (share one handler)
+  events/
+    ready.js                 init DB, register commands, reconcile orphaned posts
+    threadCreate.js          auto-tag new posts as Open
+    threadDelete.js          clean up DB rows when a post is deleted
+    interactionCreate.js     routes commands, and /post components + modals
+```
+
+Each command module exports `{ data, execute }` (the slash definition and its
+handler); `post.js` also exports `handleComponent` / `handleModal`. To add a
+command, drop a file in `src/commands/` and list it in `src/commands/index.js`.
 
 ## Changing things later
 
-Everything adjustable lives in the `CONFIG` block at the top of `index.js`: the
-category name, the role names (`Admin` / `Artist`), the discipline list, the
-level bands, and the five state tag names. To add a new discipline, add it to
-`CONFIG.disciplines` (e.g. `'Animator'`) and create a matching role — it becomes
-a toggle on `/createartist` automatically. Change a value there, save, and
-restart the bot.
+Everything adjustable lives in `config.js`: roles, the marketplace category name,
+discipline→forum gating, listing categories + their tags, level bands/caps, and
+the state tag names. To add a discipline (e.g. `Animator`): add it to
+`disciplines`, add a `forumRoles` entry, add a `categories` entry with its tags,
+and create the matching roles/tags in Discord. Restart the bot to apply.
