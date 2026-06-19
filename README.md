@@ -9,7 +9,7 @@ Postgres database.
 | Step | Trigger | Who | Result |
 |------|---------|-----|--------|
 | New post created | automatic | — | Tag → **Unclaimed** |
-| `/claim @artist` | author / admin | Tag → **In-Progress**, public "Claimed by @artist". The user must have the **artist** role. A post that's already claimed can't be claimed again. |
+| `/claim @artist` | author / admin | Tag → **In-Progress**, public "Claimed by @artist". The user must have the **discipline role required by that forum** (e.g. `Modeler` in the `models` forum). A post that's already claimed can't be claimed again. |
 | `/unclaim` | author / admin | Tag → **Unclaimed**, clears the claimer. Helpful message if nothing was claimed. |
 | `/paid` | author / admin | Tag → **Paid**, public "@buyer has paid. @artist, please send the asset over via DM to finish this process." |
 | `/done` | author / admin | Tag → **Completed**, public confirmation, **+1 to that artist's completion count**, then locks + archives the post. |
@@ -30,18 +30,39 @@ adding more forums later needs no code changes. The completion-editing commands
 (`/set` `/add` `/subtract` `/clear`) only work on members who have the **Artist**
 role.
 
+### Who can claim in a forum
+Claiming is gated by **discipline**, not the generic `Artist` role. `CONFIG.forumRoles`
+maps a forum name to the role required to be claimed there:
+
+```js
+forumRoles: {
+  models: 'Modeler',
+},
+```
+
+So only a `Modeler` can be claimed for a post in the `models` forum. Add a forum
+to the map to gate it (e.g. `animations: 'Animator'`). Any forum not in the map
+falls back to requiring the `Artist` role. The `Artist` role itself no longer
+gates marketplace work — it's used for `/portfolio` and as the umbrella for
+completion tracking.
+
 ### Levels
 Each artist's **Level** role is assigned automatically from their completion
 count, and re-evaluated every time the count changes (`/done` and the admin
 commands). The default bands (editable in `CONFIG.levels`):
 
-| Role | Completions |
-|------|-------------|
-| `Level 1` | 0–4 |
-| `Level 2` | 5–14 |
-| `Level 3` | 15–29 |
-| `Level 4` | 30–49 |
-| `Level 5` | 50+ |
+| Role | Completions | Max active claims |
+|------|-------------|-------------------|
+| `Level 1` | 0–4 | 1 |
+| `Level 2` | 5–14 | 2 |
+| `Level 3` | 15–29 | 2 |
+| `Level 4` | 30–49 | 3 |
+| `Level 5` | 50+ | 3 |
+
+Active claims are counted **across all forums**. If an artist is already at their
+limit, `/claim` refuses and posts a **public** message listing the posts they
+still have open (so everyone — including the artist — can see what's left to
+finish). They must `/done`, `/close`, or `/unclaim` one before taking another.
 
 ### Access map
 - `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **the post's author or an Admin**

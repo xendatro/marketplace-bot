@@ -15,12 +15,15 @@ const CONFIG = {
   adminRole: 'Admin',
   artistRole: 'Artist',
   disciplines: ['Modeler'],
+  forumRoles: {
+    models: 'Modeler',
+  },
   levels: [
-    { role: 'Level 1', min: 0 },
-    { role: 'Level 2', min: 5 },
-    { role: 'Level 3', min: 15 },
-    { role: 'Level 4', min: 30 },
-    { role: 'Level 5', min: 50 },
+    { role: 'Level 1', min: 0,  maxClaims: 1 },
+    { role: 'Level 2', min: 5,  maxClaims: 2 },
+    { role: 'Level 3', min: 15, maxClaims: 2 },
+    { role: 'Level 4', min: 30, maxClaims: 3 },
+    { role: 'Level 5', min: 50, maxClaims: 3 },
   ],
   tags: {
     unclaimed:  'Unclaimed',
@@ -118,6 +121,11 @@ function disciplineOption(name) {
   return name.toLowerCase().replace(/\s+/g, '-');
 }
 
+function claimRoleFor(forum) {
+  if (!forum) return CONFIG.artistRole;
+  return CONFIG.forumRoles[forum.name.toLowerCase()] ?? CONFIG.artistRole;
+}
+
 function levelFor(count) {
   let chosen = CONFIG.levels[0];
   for (const lvl of CONFIG.levels) {
@@ -164,6 +172,18 @@ async function getClaim(threadId) {
     [threadId]
   );
   return rows[0] || null;
+}
+
+async function getArtistClaims(artistId) {
+  const { rows } = await pool.query(
+    'SELECT title, status FROM claims WHERE artist_id = $1 ORDER BY title',
+    [artistId]
+  );
+  return rows;
+}
+
+function maxClaimsFor(count) {
+  return levelFor(count).maxClaims ?? 1;
 }
 
 async function getCount(artistId) {
@@ -331,10 +351,11 @@ client.on(Events.ThreadCreate, async (thread, newlyCreated) => {
 async function handleClaim(interaction, thread) {
   const artist = interaction.options.getMember('artist');
   const artistUser = interaction.options.getUser('artist');
+  const requiredRole = claimRoleFor(thread.parent);
 
-  if (!artist || !hasRole(artist, CONFIG.artistRole)) {
+  if (!artist || !hasRole(artist, requiredRole)) {
     return interaction.reply({
-      content: `${artistUser ?? 'That user'} doesn't have the **${CONFIG.artistRole}** role, so they can't claim posts.`,
+      content: `${artistUser ?? 'That user'} doesn't have the **${requiredRole}** role, so they can't claim posts in this forum.`,
       flags: MessageFlags.Ephemeral,
     });
   }
@@ -344,6 +365,15 @@ async function handleClaim(interaction, thread) {
   const existing = await getClaim(thread.id);
   if (existing) {
     return interaction.editReply(`⚠️ This post is already claimed by <@${existing.artist_id}>.`);
+  }
+
+  const max = maxClaimsFor(await getCount(artistUser.id));
+  const active = await getArtistClaims(artistUser.id);
+  if (active.length >= max) {
+    const list = active.map((c, i) => `${i + 1}. ${c.title} — *${c.status}*`).join('\n');
+    return interaction.editReply(
+      `⚠️ <@${artistUser.id}> is at their claim limit (**${max}** at a time). They still have:\n${list}\nFinish or unclaim one of these before taking another.`
+    );
   }
 
   const result = await applyTag(thread, 'inProgress');
@@ -429,10 +459,7 @@ async function handleCurrent(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const artist = interaction.options.getUser('artist');
-  const { rows } = await pool.query(
-    'SELECT title, status FROM claims WHERE artist_id = $1 ORDER BY title',
-    [artist.id]
-  );
+  const rows = await getArtistClaims(artist.id);
 
   if (rows.length === 0) {
     return interaction.editReply({ content: `<@${artist.id}> has no active tasks.`, ...NO_PING });
