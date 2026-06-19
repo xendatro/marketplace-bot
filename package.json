@@ -1,0 +1,17 @@
+{
+  "name": "marketplace-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that manages a marketplace forum post lifecycle.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "dotenv": "^16.0.0",
+    "pg": "^8.22.0"
+  }
+}
