@@ -9,22 +9,29 @@ Postgres database.
 | Step | Trigger | Who | Result |
 |------|---------|-----|--------|
 | New post created | automatic | — | Tag → **Unclaimed** |
-| `/claim @artist` | buyer | Tag → **In-Progress**, public "Claimed by @artist". The user must have the **artist** role. A post that's already claimed can't be claimed again. |
-| `/unclaim` | buyer | Tag → **Unclaimed**, clears the claimer. Helpful message if nothing was claimed. |
-| `/paid` | buyer | Tag → **Paid**, public "@buyer has paid. @artist, please send the asset over via DM to finish this process." |
-| `/done` | buyer | Tag → **Completed**, public confirmation, and **+1 to that artist's completion count**. |
-| `/close` | buyer | Tag → **Closed**, then locks + archives the post. |
+| `/claim @artist` | author / admin | Tag → **In-Progress**, public "Claimed by @artist". The user must have the **artist** role. A post that's already claimed can't be claimed again. |
+| `/unclaim` | author / admin | Tag → **Unclaimed**, clears the claimer. Helpful message if nothing was claimed. |
+| `/paid` | author / admin | Tag → **Paid**, public "@buyer has paid. @artist, please send the asset over via DM to finish this process." |
+| `/done` | author / admin | Tag → **Completed**, public confirmation, **+1 to that artist's completion count**, then locks + archives the post. |
+| `/close` | author / admin | Tag → **Closed**, then locks + archives the post (no completion credited). |
 | `/current @artist` | admin | Lists that artist's current (active) tasks by title. Private to the admin who runs it. |
 | `/leaderboard` | everyone | Shows the artists with the most completions. |
+| `/view @artist` | everyone | Shows that artist's completion count (no ping). |
+| `/set @artist <n>` | admin | Sets that artist's completion count to `n`. |
+| `/add @artist <n>` | admin | Adds `n` to that artist's completion count. |
+| `/subtract @artist <n>` | admin | Subtracts `n` (won't go below 0). |
+| `/clear @artist` | admin | Resets that artist's completion count to 0. |
 
 Each lifecycle state is shown by swapping the post's tag (only one state tag at
 a time). The bot watches every forum under the **marketplace** category, so
-adding more forums later needs no code changes.
+adding more forums later needs no code changes. The completion-editing commands
+(`/set` `/add` `/subtract` `/clear`) only work on members who have the **artist**
+role.
 
 ### Access map
-- `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **buyer** role
-- `/current` → **admin** role
-- `/leaderboard` → everyone
+- `/claim`, `/unclaim`, `/paid`, `/done`, `/close` → **the post's author or an admin**
+- `/current`, `/set`, `/add`, `/subtract`, `/clear` → **admin** role
+- `/leaderboard`, `/view` → everyone
 
 ## One-time setup
 
@@ -42,9 +49,11 @@ forum's settings, create tags named exactly (matching is case-insensitive):
 the name.)
 
 ### 2. Create the roles
-Make sure you have roles named `buyer`, `artist`, and `admin`. Buyers run the
-lifecycle commands; artists are the people making the assets (a post can only be
-claimed for someone with this role); admins use `/current` for oversight.
+Make sure you have roles named `artist` and `admin`. Artists are the people
+making the assets — a post can only be claimed for, and completions can only be
+edited for, someone with this role. The lifecycle commands are run by the post's
+author or an admin; admins also handle oversight (`/current`) and completion
+edits (`/set` `/add` `/subtract` `/clear`).
 
 ### 3. Give the bot permission
 The bot's role needs **Manage Posts** (a.k.a. Manage Threads) in the
@@ -98,5 +107,5 @@ not a Web Service.
 ## Changing things later
 
 Everything adjustable lives in the `CONFIG` block at the top of `index.js`: the
-category name, the role names (buyer / admin / artist), and the five state tag
-names. Change a value there, save, and restart the bot.
+category name, the role names (admin / artist), and the five state tag names.
+Change a value there, save, and restart the bot.

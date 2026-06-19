@@ -12,7 +12,6 @@ const { Pool } = require('pg');
 
 const CONFIG = {
   categoryName: 'marketplace',
-  buyerRole: 'buyer',
   adminRole: 'admin',
   artistRole: 'artist',
   tags: {
@@ -85,8 +84,26 @@ function hasRole(member, roleName) {
   );
 }
 
+function isAdmin(member) {
+  return hasRole(member, CONFIG.adminRole);
+}
+
+function isOwnerOrAdmin(interaction, thread) {
+  return interaction.user.id === thread.ownerId || isAdmin(interaction.member);
+}
+
 function tagNote({ missingTag, tagName }) {
   return missingTag ? ` (No **${tagName}** tag found in this forum — create it.)` : '';
+}
+
+function plural(n) {
+  return `${n} completion${n === 1 ? '' : 's'}`;
+}
+
+function artistDisplayName(interaction) {
+  const member = interaction.options.getMember('artist');
+  const user = interaction.options.getUser('artist');
+  return member?.displayName ?? user?.username ?? 'That user';
 }
 
 async function getClaim(threadId) {
@@ -97,6 +114,28 @@ async function getClaim(threadId) {
   return rows[0] || null;
 }
 
+async function getCount(artistId) {
+  const { rows } = await pool.query(
+    'SELECT count FROM completions WHERE artist_id = $1',
+    [artistId]
+  );
+  return rows[0]?.count ?? 0;
+}
+
+async function setCount(artistId, n) {
+  if (n <= 0) {
+    await pool.query('DELETE FROM completions WHERE artist_id = $1', [artistId]);
+    return 0;
+  }
+  await pool.query(
+    `INSERT INTO completions (artist_id, count)
+     VALUES ($1, $2)
+     ON CONFLICT (artist_id) DO UPDATE SET count = $2`,
+    [artistId, n]
+  );
+  return n;
+}
+
 const NO_PING = { allowedMentions: { parse: [] } };
 
 const commands = [
@@ -104,10 +143,7 @@ const commands = [
     .setName('claim')
     .setDescription('Mark this post as claimed / in-progress by an artist.')
     .addUserOption((opt) =>
-      opt
-        .setName('artist')
-        .setDescription('The artist who claimed this task')
-        .setRequired(true)
+      opt.setName('artist').setDescription('The artist who claimed this task').setRequired(true)
     ),
   new SlashCommandBuilder()
     .setName('unclaim')
@@ -117,7 +153,7 @@ const commands = [
     .setDescription('Mark this post as paid (asset not yet received).'),
   new SlashCommandBuilder()
     .setName('done')
-    .setDescription('Mark this post as completed and credit the artist.'),
+    .setDescription('Mark this post completed, credit the artist, then close it.'),
   new SlashCommandBuilder()
     .setName('close')
     .setDescription('Close this post, then lock and archive it.'),
@@ -125,14 +161,50 @@ const commands = [
     .setName('current')
     .setDescription("List an artist's current (active) tasks.")
     .addUserOption((opt) =>
-      opt
-        .setName('artist')
-        .setDescription('The artist to look up')
-        .setRequired(true)
+      opt.setName('artist').setDescription('The artist to look up').setRequired(true)
     ),
   new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Show the artists with the most completions.'),
+  new SlashCommandBuilder()
+    .setName('view')
+    .setDescription("View an artist's completion count.")
+    .addUserOption((opt) =>
+      opt.setName('artist').setDescription('The artist to look up').setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName('set')
+    .setDescription("Set an artist's completion count to a value.")
+    .addUserOption((opt) =>
+      opt.setName('artist').setDescription('The artist to edit').setRequired(true)
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('The value to set').setRequired(true).setMinValue(0)
+    ),
+  new SlashCommandBuilder()
+    .setName('add')
+    .setDescription("Add to an artist's completion count.")
+    .addUserOption((opt) =>
+      opt.setName('artist').setDescription('The artist to edit').setRequired(true)
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('How many to add').setRequired(true).setMinValue(1)
+    ),
+  new SlashCommandBuilder()
+    .setName('subtract')
+    .setDescription("Subtract from an artist's completion count.")
+    .addUserOption((opt) =>
+      opt.setName('artist').setDescription('The artist to edit').setRequired(true)
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('How many to subtract').setRequired(true).setMinValue(1)
+    ),
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription("Reset an artist's completion count to zero.")
+    .addUserOption((opt) =>
+      opt.setName('artist').setDescription('The artist to clear').setRequired(true)
+    ),
 ].map((c) => c.toJSON());
 
 client.once(Events.ClientReady, async (c) => {
@@ -183,9 +255,7 @@ async function handleClaim(interaction, thread) {
 
   const existing = await getClaim(thread.id);
   if (existing) {
-    return interaction.editReply(
-      `⚠️ This post is already claimed by <@${existing.artist_id}>.`
-    );
+    return interaction.editReply(`⚠️ This post is already claimed by <@${existing.artist_id}>.`);
   }
 
   const result = await applyTag(thread, 'inProgress');
@@ -202,16 +272,12 @@ async function handleUnclaim(interaction, thread) {
 
   const existing = await getClaim(thread.id);
   if (!existing) {
-    return interaction.editReply(
-      "This post isn't currently claimed, so there's nothing to unclaim."
-    );
+    return interaction.editReply("This post isn't currently claimed, so there's nothing to unclaim.");
   }
 
   const result = await applyTag(thread, 'unclaimed');
   await pool.query('DELETE FROM claims WHERE thread_id = $1', [thread.id]);
-  await interaction.editReply(
-    `Unclaimed — this post is open again for any artist.${tagNote(result)}`
-  );
+  await interaction.editReply(`Unclaimed — this post is open again for any artist.${tagNote(result)}`);
 }
 
 async function handlePaid(interaction, thread) {
@@ -219,16 +285,11 @@ async function handlePaid(interaction, thread) {
 
   const existing = await getClaim(thread.id);
   if (!existing) {
-    return interaction.editReply(
-      "This post isn't claimed yet — run **/claim** before marking it paid."
-    );
+    return interaction.editReply("This post isn't claimed yet — run **/claim** before marking it paid.");
   }
 
   const result = await applyTag(thread, 'paid');
-  await pool.query(
-    "UPDATE claims SET status = 'Paid' WHERE thread_id = $1",
-    [thread.id]
-  );
+  await pool.query("UPDATE claims SET status = 'Paid' WHERE thread_id = $1", [thread.id]);
   await interaction.editReply(
     `<@${interaction.user.id}> has paid. <@${existing.artist_id}>, please send the asset over via DM to finish this process.${tagNote(result)}`
   );
@@ -239,9 +300,7 @@ async function handleDone(interaction, thread) {
 
   const existing = await getClaim(thread.id);
   if (!existing) {
-    return interaction.editReply(
-      "This post isn't claimed yet — run **/claim** before marking it done."
-    );
+    return interaction.editReply("This post isn't claimed yet — run **/claim** before marking it done.");
   }
 
   const result = await applyTag(thread, 'done');
@@ -253,8 +312,10 @@ async function handleDone(interaction, thread) {
   );
   await pool.query('DELETE FROM claims WHERE thread_id = $1', [thread.id]);
   await interaction.editReply(
-    `Transaction complete — this post is marked **${CONFIG.tags.done}**. Thanks <@${existing.artist_id}>!${tagNote(result)}`
+    `Transaction complete — marked **${CONFIG.tags.done}** and the post is now closed. Thanks <@${existing.artist_id}>!${tagNote(result)}`
   );
+  await thread.setLocked(true);
+  await thread.setArchived(true);
 }
 
 async function handleClose(interaction, thread) {
@@ -268,7 +329,7 @@ async function handleClose(interaction, thread) {
 }
 
 async function handleCurrent(interaction) {
-  if (!hasRole(interaction.member, CONFIG.adminRole)) {
+  if (!isAdmin(interaction.member)) {
     return interaction.reply({
       content: `Only members with the **${CONFIG.adminRole}** role can use this command.`,
       flags: MessageFlags.Ephemeral,
@@ -284,15 +345,10 @@ async function handleCurrent(interaction) {
   );
 
   if (rows.length === 0) {
-    return interaction.editReply({
-      content: `<@${artist.id}> has no active tasks.`,
-      ...NO_PING,
-    });
+    return interaction.editReply({ content: `<@${artist.id}> has no active tasks.`, ...NO_PING });
   }
 
-  const list = rows
-    .map((r, i) => `${i + 1}. ${r.title} — *${r.status}*`)
-    .join('\n');
+  const list = rows.map((r, i) => `${i + 1}. ${r.title} — *${r.status}*`).join('\n');
   return interaction.editReply({
     content: `**Active tasks for <@${artist.id}> (${rows.length}):**\n${list}`,
     ...NO_PING,
@@ -307,23 +363,67 @@ async function handleLeaderboard(interaction) {
   );
 
   if (rows.length === 0) {
-    return interaction.editReply({
-      content: 'No completions yet — the leaderboard is empty.',
-      ...NO_PING,
-    });
+    return interaction.editReply({ content: 'No completions yet — the leaderboard is empty.', ...NO_PING });
   }
 
   const medals = ['🥇', '🥈', '🥉'];
   const list = rows
     .map((r, i) => `${medals[i] ?? `**${i + 1}.**`} <@${r.artist_id}> — ${r.count}`)
     .join('\n');
-  return interaction.editReply({
-    content: `**🏆 Completions leaderboard**\n${list}`,
-    ...NO_PING,
-  });
+  return interaction.editReply({ content: `**🏆 Completions leaderboard**\n${list}`, ...NO_PING });
+}
+
+async function handleView(interaction) {
+  await interaction.deferReply();
+
+  const artistUser = interaction.options.getUser('artist');
+  const name = artistDisplayName(interaction);
+  const count = await getCount(artistUser.id);
+  return interaction.editReply({ content: `**${name}** has **${plural(count)}**.`, ...NO_PING });
+}
+
+async function handleStat(interaction, op) {
+  if (!isAdmin(interaction.member)) {
+    return interaction.reply({
+      content: `Only members with the **${CONFIG.adminRole}** role can use this command.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  const artistMember = interaction.options.getMember('artist');
+  const artistUser = interaction.options.getUser('artist');
+  if (!artistMember || !hasRole(artistMember, CONFIG.artistRole)) {
+    return interaction.reply({
+      content: `${artistUser ?? 'That user'} doesn't have the **${CONFIG.artistRole}** role, so their completions can't be edited.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const name = artistMember.displayName;
+  const amount = op === 'clear' ? null : interaction.options.getInteger('amount');
+  const current = await getCount(artistUser.id);
+
+  let next;
+  if (op === 'set') next = amount;
+  else if (op === 'add') next = current + amount;
+  else if (op === 'subtract') next = Math.max(0, current - amount);
+  else next = 0;
+
+  await setCount(artistUser.id, next);
+
+  let message;
+  if (op === 'set') message = `Set **${name}** to **${plural(next)}**.`;
+  else if (op === 'add') message = `Added **${amount}** — **${name}** now has **${plural(next)}**.`;
+  else if (op === 'subtract') message = `Subtracted **${amount}** — **${name}** now has **${plural(next)}**.`;
+  else message = `Cleared **${name}**'s completions — now **${plural(0)}**.`;
+
+  return interaction.editReply({ content: message, ...NO_PING });
 }
 
 const POST_COMMANDS = new Set(['claim', 'unclaim', 'paid', 'done', 'close']);
+const STAT_COMMANDS = new Set(['set', 'add', 'subtract', 'clear']);
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -333,6 +433,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (name === 'current') return await handleCurrent(interaction);
     if (name === 'leaderboard') return await handleLeaderboard(interaction);
+    if (name === 'view') return await handleView(interaction);
+    if (STAT_COMMANDS.has(name)) return await handleStat(interaction, name);
 
     if (POST_COMMANDS.has(name)) {
       if (!isMarketplacePost(interaction.channel)) {
@@ -341,14 +443,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           flags: MessageFlags.Ephemeral,
         });
       }
-      if (!hasRole(interaction.member, CONFIG.buyerRole)) {
+      const thread = interaction.channel;
+      if (!isOwnerOrAdmin(interaction, thread)) {
         return interaction.reply({
-          content: `Only members with the **${CONFIG.buyerRole}** role can use this command.`,
+          content: 'Only the person who created this post or an admin can use this command.',
           flags: MessageFlags.Ephemeral,
         });
       }
 
-      const thread = interaction.channel;
       if (name === 'claim')   return await handleClaim(interaction, thread);
       if (name === 'unclaim') return await handleUnclaim(interaction, thread);
       if (name === 'paid')    return await handlePaid(interaction, thread);
@@ -363,9 +465,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply(msg).catch(() => {});
     } else {
-      await interaction
-        .reply({ content: msg, flags: MessageFlags.Ephemeral })
-        .catch(() => {});
+      await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral }).catch(() => {});
     }
   }
 });
