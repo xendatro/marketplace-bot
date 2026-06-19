@@ -49,15 +49,17 @@ module.exports = {
     const portfolioLine = portfolio
       ? portfolio
       : "Not linked — ask them directly if you'd like to see their work.";
+    const buyerId = post?.buyer_id ?? thread.ownerId;
 
     await thread.send({
       content: [
+        `<@${buyerId}> — you have a new applicant:`,
         `**Applicant:** <@${artistId}>`,
         `**Total Completions:** ${count}`,
         `**Offered Date of Completion:** ${offeredDate || 'N/A'}`,
         `**Portfolio:** ${portfolioLine}`,
       ].join('\n'),
-      allowedMentions: { users: [artistId] },
+      allowedMentions: { users: [buyerId, artistId] },
     });
     return interaction.editReply('Your application is in — the buyer picks from everyone who applied.');
   },
