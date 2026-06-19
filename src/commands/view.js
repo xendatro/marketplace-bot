@@ -26,8 +26,8 @@ module.exports = {
     const content = [
       `**Display Name:** ${displayName}`,
       `**Username:** ${artistUser.username}`,
-      `**Completions:** ${count}`,
       `**Level:** ${level}`,
+      `**Completions:** ${count}`,
       `**Portfolio:** ${portfolioLine}`,
     ].join('\n');
 

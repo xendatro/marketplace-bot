@@ -42,6 +42,7 @@ async function initDb() {
       PRIMARY KEY (thread_id, artist_id)
     );
   `);
+  await pool.query('ALTER TABLE claims ADD COLUMN IF NOT EXISTS offered_date TEXT');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS completions (
@@ -103,11 +104,11 @@ async function deletePost(threadId) {
 
 // ── claims ─────────────────────────────────────────────────────────────────
 
-async function addClaim(threadId, artistId) {
+async function addClaim(threadId, artistId, offeredDate = null) {
   await pool.query(
-    `INSERT INTO claims (thread_id, artist_id) VALUES ($1, $2)
+    `INSERT INTO claims (thread_id, artist_id, offered_date) VALUES ($1, $2, $3)
      ON CONFLICT (thread_id, artist_id) DO NOTHING`,
-    [threadId, artistId]
+    [threadId, artistId, offeredDate]
   );
 }
 

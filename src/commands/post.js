@@ -17,45 +17,65 @@ const { findForum, findTagId } = require('../forum');
 const { ensurePost } = require('../db');
 
 const categoryNames = Object.keys(CONFIG.categories);
+const DEADLINES = CONFIG.deadlines && CONFIG.deadlines.length ? CONFIG.deadlines : ['No deadline'];
 
 function categoryRow() {
   const select = new StringSelectMenuBuilder()
     .setCustomId('post:cat')
     .setPlaceholder('Choose a category')
-    .addOptions(categoryNames.map((name) => ({ label: name, value: name })));
+    .addOptions(categoryNames.map((n) => ({ label: n, value: n })));
   return new ActionRowBuilder().addComponents(select);
 }
 
-function tagsRow(category, selected = []) {
-  const tags = CONFIG.categories[category].tags;
-  if (tags.length === 0) return null;
-  const max = Math.min(4, tags.length);
+function tagsRow(cat, tags) {
+  const all = CONFIG.categories[cat].tags;
+  if (all.length === 0) return null;
+  const max = Math.min(4, all.length);
   const select = new StringSelectMenuBuilder()
-    .setCustomId(`post:tags:${category}`)
+    .setCustomId(`post:tags:${cat}:${tags.dl}`)
     .setPlaceholder(`Optional: pick up to ${max} tag(s)`)
     .setMinValues(0)
     .setMaxValues(max)
-    .addOptions(tags.map((t, i) => ({ label: t, value: String(i), default: selected.includes(i) })));
+    .addOptions(all.map((t, i) => ({ label: t, value: String(i), default: tags.list.includes(i) })));
   return new ActionRowBuilder().addComponents(select);
 }
 
-function continueRow(category, selected = []) {
+function deadlineRow(cat, tags) {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`post:dl:${cat}:${tags.list.join(',')}`)
+    .setPlaceholder('Deadline')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(DEADLINES.map((d, i) => ({ label: d, value: String(i), default: i === tags.dl })));
+  return new ActionRowBuilder().addComponents(select);
+}
+
+function continueRow(cat, tags) {
   const btn = new ButtonBuilder()
-    .setCustomId(`post:go:${category}:${selected.join(',')}`)
+    .setCustomId(`post:go:${cat}:${tags.list.join(',')}:${tags.dl}`)
     .setLabel('Continue')
     .setStyle(ButtonStyle.Primary);
   return new ActionRowBuilder().addComponents(btn);
 }
 
-function stepComponents(category, selected = []) {
-  const tags = tagsRow(category, selected);
-  return tags ? [tags, continueRow(category, selected)] : [continueRow(category, selected)];
+function stepComponents(cat, list, dl) {
+  const state = { list, dl };
+  const rows = [];
+  const tr = tagsRow(cat, state);
+  if (tr) rows.push(tr);
+  rows.push(deadlineRow(cat, state));
+  rows.push(continueRow(cat, state));
+  return rows;
 }
 
-function buildModal(category, indicesCsv) {
+function stepContent(cat, list, dl) {
+  return `Category: **${cat}**. Tags: **${list.length}**, Deadline: **${DEADLINES[dl] ?? DEADLINES[0]}**. Hit **Continue** when ready.`;
+}
+
+function buildModal(cat, tagsCsv, dl) {
   return new ModalBuilder()
-    .setCustomId(`post:modal:${category}:${indicesCsv}`)
-    .setTitle(`New ${category} listing`.slice(0, 45))
+    .setCustomId(`post:modal:${cat}:${tagsCsv}:${dl}`)
+    .setTitle(`New ${cat} listing`.slice(0, 45))
     .addLabelComponents(
       new LabelBuilder()
         .setLabel('Title')
@@ -89,45 +109,45 @@ function buildModal(category, indicesCsv) {
     );
 }
 
-function splitCategoryAndCsv(rest) {
-  const sep = rest.indexOf(':');
-  if (sep === -1) return { category: rest, csv: '' };
-  return { category: rest.slice(0, sep), csv: rest.slice(sep + 1) };
-}
+const after = (id, prefix) => id.slice(prefix.length);
+const parseTags = (csv) => (csv ? csv.split(',').map(Number).filter((n) => !Number.isNaN(n)) : []);
 
 async function handleComponent(interaction) {
   const id = interaction.customId;
 
   if (id === 'post:cat') {
-    const category = interaction.values[0];
-    return interaction.update({
-      content: `Category: **${category}**. Optionally pick tags, then hit **Continue**.`,
-      components: stepComponents(category, []),
-    });
+    const cat = interaction.values[0];
+    return interaction.update({ content: stepContent(cat, [], 0), components: stepComponents(cat, [], 0) });
   }
 
   if (id.startsWith('post:tags:')) {
-    const category = id.slice('post:tags:'.length);
-    const selected = interaction.values.map(Number).sort((a, b) => a - b);
-    return interaction.update({
-      content: `Category: **${category}**. Tags selected: **${selected.length}**. Hit **Continue** when ready.`,
-      components: stepComponents(category, selected),
-    });
+    const [cat, dlStr] = after(id, 'post:tags:').split(':');
+    const dl = Number(dlStr) || 0;
+    const list = interaction.values.map(Number).sort((a, b) => a - b);
+    return interaction.update({ content: stepContent(cat, list, dl), components: stepComponents(cat, list, dl) });
+  }
+
+  if (id.startsWith('post:dl:')) {
+    const [cat, tagsCsv = ''] = after(id, 'post:dl:').split(':');
+    const list = parseTags(tagsCsv);
+    const dl = Number(interaction.values[0]) || 0;
+    return interaction.update({ content: stepContent(cat, list, dl), components: stepComponents(cat, list, dl) });
   }
 
   if (id.startsWith('post:go:')) {
-    const { category, csv } = splitCategoryAndCsv(id.slice('post:go:'.length));
-    return interaction.showModal(buildModal(category, csv));
+    const [cat, tagsCsv = '', dlStr = '0'] = after(id, 'post:go:').split(':');
+    return interaction.showModal(buildModal(cat, tagsCsv, dlStr));
   }
 }
 
 async function handleModal(interaction) {
-  const { category, csv } = splitCategoryAndCsv(interaction.customId.slice('post:modal:'.length));
-  const indices = csv ? csv.split(',').map(Number).filter((n) => !Number.isNaN(n)) : [];
+  const [cat, tagsCsv = '', dlStr = '0'] = after(interaction.customId, 'post:modal:').split(':');
+  const indices = parseTags(tagsCsv);
+  const dl = Number(dlStr) || 0;
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const cfg = CONFIG.categories[category];
+  const cfg = CONFIG.categories[cat];
   if (!cfg) return interaction.editReply('That category no longer exists. Please run **/post** again.');
 
   const title = interaction.fields.getTextInputValue('title').trim();
@@ -177,7 +197,8 @@ async function handleModal(interaction) {
   const polyIds = selectedTags.map((t) => findTagId(forum, t)).filter(Boolean);
   const appliedTags = [unclaimedId, ...polyIds].filter(Boolean).slice(0, 5);
 
-  const body = `Buyer: <@${interaction.user.id}>\nDescription: ${description}`;
+  const deadline = DEADLINES[dl] ?? DEADLINES[0];
+  const body = `Buyer: <@${interaction.user.id}>\nDeadline: ${deadline}\nDescription: ${description}`;
 
   let thread;
   try {

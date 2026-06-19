@@ -10,7 +10,7 @@ applications, completions, levels, and portfolios in a Postgres database.
 | Step | Command | Who | Result |
 |------|---------|-----|--------|
 | Create a listing | `/post` | **Buyer** | Guided form → the bot posts the thread, tagged **Open**, and records the buyer as the owner. |
-| Show interest | `/apply` | **Artist** (with the forum's discipline role) | Adds the artist to the applicant pool and posts their **portfolio**. Unlimited applicants — but only while the post is **Open** (applications close once someone's accepted). |
+| Show interest | `/apply [completion_date]` | **Artist** (with the forum's discipline role) | Joins the applicant pool and posts a card (pinging them) with **completions, an optional offered completion date, and portfolio**. Unlimited applicants — but only while the post is **Open** (applications close once someone's accepted). |
 | Withdraw interest | `/withdraw` | **Artist** | Removes their own pending application (only possible while Open). |
 | Assign the task | `/accept @artist` | **Buyer / Admin** | Picks one applicant → **In-Progress**, and **clears all other applications**. Re-checks discipline, that they applied, and their accepted-task cap. |
 | Un-assign | `/unaccept` | **Buyer / Admin** | Removes the acceptance → back to **Open**. The pool was cleared on accept, so artists must **re-apply**. |
@@ -25,7 +25,7 @@ Other commands:
 |---------|-----|--------|
 | `/withdraw-all` | anyone | Withdraws all your pending applications server-wide (keeps accepted tasks). Run anywhere. |
 | `/current @artist` | **Admin** | Lists that artist's applications + accepted tasks (private). |
-| `/view @artist` | everyone | Display Name, Username, Completions, Level, Portfolio (no ping). |
+| `/view @artist` | everyone | Display Name, Username, Level, Completions, Portfolio (no ping). |
 | `/leaderboard` | everyone | Top 10 by completions (plain names, no pings). |
 | `/portfolio [link]` | **Artist** | Sets/clears your own portfolio link. |
 | `/createartist @user [modeler]` | **Admin** | Gives the **Artist** role, **Level 1**, and any disciplines you toggle. |
@@ -81,10 +81,14 @@ applying.
 
 `/post` (buyers only) opens a short flow:
 1. **Category** select (currently `Models`).
-2. **Tags** select for that category (e.g. Low-Poly, Stylized…), then **Continue**.
+2. **Tags** (optional) and **Deadline** dropdowns for that category, then **Continue**.
 3. A popup with **Title**, **Price — USD**, **Price — Robux**, **Description**,
-   and a **Reference image(s)** upload (paste, drag, or browse — real images, not
-   links; 1–10 required).
+   and **Reference image(s)** (paste, drag, or browse — real images, not links;
+   1–10 required).
+
+The deadline runs from `No deadline` through `1 day` … `1 month` (the list lives
+in `CONFIG.deadlines`). A typed deadline isn't possible because Discord caps a
+modal at 5 fields and the popup is already full — hence the dropdown.
 
 At least one price is required. The bot then creates the forum post:
 - Title formatted `[$USD] [R$Robux] Title` (only the prices you filled; the price
@@ -94,6 +98,7 @@ At least one price is required. The bot then creates the forum post:
 - Body:
   ```
   Buyer: @buyer
+  Deadline: …
   Description: …
   ```
 - The buyer is recorded as the owner, so `/accept`, `/paid`, etc. recognize them
@@ -198,7 +203,7 @@ command, drop a file in `src/commands/` and list it in `src/commands/index.js`.
 ## Changing things later
 
 Everything adjustable lives in `config.js`: roles, the marketplace category name,
-discipline→forum gating, listing categories + their tags, level bands/caps, and
-the state tag names. To add a discipline (e.g. `Animator`): add it to
+discipline→forum gating, listing categories + their tags, the deadline options,
+level bands/caps, and the state tag names. To add a discipline (e.g. `Animator`): add it to
 `disciplines`, add a `forumRoles` entry, add a `categories` entry with its tags,
 and create the matching roles/tags in Discord. Restart the bot to apply.

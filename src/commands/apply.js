@@ -1,13 +1,19 @@
 const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { requireMarketplacePost } = require('../guards');
 const { hasRole, claimRoleFor } = require('../roles');
-const { ensurePost, getPost, hasClaim, addClaim, getPortfolio } = require('../db');
-const { NO_PING } = require('../util');
+const { ensurePost, getPost, hasClaim, addClaim, getCount, getPortfolio } = require('../db');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('apply')
-    .setDescription('Apply to take on this task (the buyer accepts one applicant).'),
+    .setDescription('Apply to take on this task (the buyer accepts one applicant).')
+    .addStringOption((opt) =>
+      opt
+        .setName('completion_date')
+        .setDescription('Optional: when you could finish by')
+        .setRequired(false)
+        .setMaxLength(100)
+    ),
   execute: async (interaction) => {
     const thread = await requireMarketplacePost(interaction);
     if (!thread) return;
@@ -35,16 +41,23 @@ module.exports = {
       return interaction.editReply("You've already applied to this task. Use **/withdraw** to pull your application.");
     }
 
-    await addClaim(thread.id, artistId);
+    const offeredDate = (interaction.options.getString('completion_date') || '').trim() || null;
+    await addClaim(thread.id, artistId, offeredDate);
 
+    const count = await getCount(artistId);
     const portfolio = await getPortfolio(artistId);
     const portfolioLine = portfolio
       ? portfolio
-      : "Not linked — this artist hasn't added a portfolio yet. Ask them directly if you'd like to see their work.";
+      : "Not linked — ask them directly if you'd like to see their work.";
 
     await thread.send({
-      content: `🙋 <@${artistId}> has applied for this task.\n**Portfolio:** ${portfolioLine}\nThe buyer can **/accept @artist** to assign it.`,
-      ...NO_PING,
+      content: [
+        `**Applicant:** <@${artistId}>`,
+        `**Total Completions:** ${count}`,
+        `**Offered Date of Completion:** ${offeredDate || 'N/A'}`,
+        `**Portfolio:** ${portfolioLine}`,
+      ].join('\n'),
+      allowedMentions: { users: [artistId] },
     });
     return interaction.editReply('Your application is in — the buyer picks from everyone who applied.');
   },
