@@ -22,6 +22,16 @@ module.exports = {
         return;
       }
     } catch (err) {
+      // 10062 = Unknown interaction, 40060 = already acknowledged. These almost
+      // always mean a second copy of the bot is running on the same token and
+      // beat this one to the response. The interaction is dead, so don't try to
+      // reply (that would just throw again).
+      if (err && (err.code === 10062 || err.code === 40060)) {
+        console.warn(
+          `Stale interaction (code ${err.code}) — this usually means more than one instance of the bot is running on the same token.`
+        );
+        return;
+      }
       console.error(err);
       const msg =
         'Something went wrong — make sure I have the right permissions, that my role is high enough, ' +

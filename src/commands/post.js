@@ -69,7 +69,7 @@ function stepComponents(cat, list, dl) {
 }
 
 function stepContent(cat, list, dl) {
-  return `Category: **${cat}**. Tags: **${list.length}**, Deadline: **${DEADLINES[dl] ?? DEADLINES[0]}**. Hit **Continue** when ready.`;
+  return `Category: **${cat}**. Tags: **${list.length}**, Deadline: **${DEADLINES[dl] ?? DEADLINES[0]}**. Hit **Continue** to open the form and finish.`;
 }
 
 function buildModal(cat, tagsCsv, dl) {
@@ -145,10 +145,22 @@ async function handleModal(interaction) {
   const indices = parseTags(tagsCsv);
   const dl = Number(dlStr) || 0;
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  // The modal was opened from the ephemeral step message, so we edit THAT message
+  // in place — clearing the dropdowns on success, or keeping them for a retry on
+  // error — instead of leaving it lingering behind a separate reply.
+  const fromMessage = typeof interaction.isFromMessage === 'function' && interaction.isFromMessage();
+  if (fromMessage) await interaction.deferUpdate();
+  else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const fail = (content) =>
+    fromMessage
+      ? interaction.editReply({ content, components: stepComponents(cat, indices, dl) })
+      : interaction.editReply(content);
+  const done = (content) =>
+    fromMessage ? interaction.editReply({ content, components: [] }) : interaction.editReply(content);
 
   const cfg = CONFIG.categories[cat];
-  if (!cfg) return interaction.editReply('That category no longer exists. Please run **/post** again.');
+  if (!cfg) return fail('That category no longer exists. Please run **/post** again.');
 
   const title = interaction.fields.getTextInputValue('title').trim();
   const usd = interaction.fields.getTextInputValue('price_usd').trim();
@@ -156,14 +168,14 @@ async function handleModal(interaction) {
   const description = interaction.fields.getTextInputValue('description').trim();
 
   if (!usd && !robux) {
-    return interaction.editReply('You must enter at least one price (USD or Robux). Please run **/post** again.');
+    return fail('You must enter at least one price (USD or Robux). Re-open the form with **Continue**.');
   }
   const numericish = (s) => Number(s.replace(/[, ]/g, ''));
   if (usd && Number.isNaN(numericish(usd))) {
-    return interaction.editReply('The USD price must be a number. Please run **/post** again.');
+    return fail('The USD price must be a number. Re-open the form with **Continue**.');
   }
   if (robux && Number.isNaN(numericish(robux))) {
-    return interaction.editReply('The Robux price must be a number. Please run **/post** again.');
+    return fail('The Robux price must be a number. Re-open the form with **Continue**.');
   }
 
   let images = [];
@@ -174,17 +186,15 @@ async function handleModal(interaction) {
     images = [];
   }
   if (images.length === 0) {
-    return interaction.editReply('At least one reference image is required. Please run **/post** again.');
+    return fail('At least one reference image is required. Re-open the form with **Continue**.');
   }
   if (images.some((f) => f.contentType && !f.contentType.startsWith('image/'))) {
-    return interaction.editReply('All references must be image files. Please run **/post** again.');
+    return fail('All references must be image files. Re-open the form with **Continue**.');
   }
 
   const forum = findForum(interaction.guild, cfg.forum);
   if (!forum) {
-    return interaction.editReply(
-      `Couldn't find the **${cfg.forum}** forum under the **${CONFIG.categoryName}** category.`
-    );
+    return fail(`Couldn't find the **${cfg.forum}** forum under the **${CONFIG.categoryName}** category.`);
   }
 
   const priceParts = [];
@@ -214,13 +224,11 @@ async function handleModal(interaction) {
     });
   } catch (err) {
     console.error('Failed to create listing:', err);
-    return interaction.editReply(
-      'Failed to create the post — make sure I can create posts and attach files in that forum.'
-    );
+    return fail('Failed to create the post — make sure I can create posts and attach files in that forum.');
   }
 
   await ensurePost(thread.id, interaction.user.id, name);
-  return interaction.editReply(`✅ Your listing is up: ${thread}`);
+  return done(`✅ Your listing is up: ${thread}`);
 }
 
 module.exports = {
